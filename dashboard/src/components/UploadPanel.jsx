@@ -57,10 +57,14 @@ export default function UploadPanel({ onDone }) {
         motion_threshold: motionT, stable_frames_required: stableN,
         new_content_threshold: contentT,
       });
-      setStatus({ ok: true, msg: `✅ ${res.keyframes_captured} keyframes from "${res.title}"` });
-      onDone();
-    } catch { setStatus({ ok: false, msg: "Processing failed." }); }
-    setLoading(false);
+      setStatus({ ok: true, msg: `✅ "${res.title}" is downloading & processing in the background!` });
+      setTimeout(() => {
+        onDone();
+      }, 1000);
+    } catch {
+      setStatus({ ok: false, msg: "Processing failed." });
+      setLoading(false);
+    }
   }
 
   return (
