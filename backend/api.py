@@ -117,7 +117,7 @@ def get_video(video_id: str):
 
 @app.delete("/api/videos/{video_id}")
 def delete_video_endpoint(video_id: str):
-    v = db.get_video_by_id(video_id)
+    v = db.get_video(video_id)
     if not v:
         raise HTTPException(404, "Video not found")
 
@@ -157,23 +157,22 @@ def get_image_raw(image_id: str):
 @app.get("/api/keyframes/{image_id}/image")
 def get_keyframe_image(image_id: str):
     """
-    Serve an image by its internal DB id (for backward compat with the dashboard).
-    Tries to find by image_id first, then by internal id.
+    Serve an image by its internal DB id or ECHD image_id.
+    Uses efficient MongoDB _id lookup — no full table scan.
     """
-    # Try ECHD image_id first
-    record = db.get_dataset_image_by_id(image_id)
+    # Try by internal MongoDB _id first (this is what the frontend sends)
+    record = db.get_dataset_image_by_internal_id(image_id)
     if record:
         data = storage.get_image(record["image_path"])
         if data:
             return Response(content=data, media_type="image/jpeg")
 
-    # Try by internal DB id
-    images = db.get_dataset_images(limit=10000)
-    for img in images:
-        if img["id"] == image_id:
-            data = storage.get_image(img["image_path"])
-            if data:
-                return Response(content=data, media_type="image/jpeg")
+    # Try by ECHD image_id (e.g. ECHD000001)
+    record = db.get_dataset_image_by_id(image_id)
+    if record:
+        data = storage.get_image(record["image_path"])
+        if data:
+            return Response(content=data, media_type="image/jpeg")
 
     raise HTTPException(404, "Image not found")
 
@@ -334,6 +333,7 @@ async def upload_images(
     video_id = db.insert_video(
         filename=f"Image Upload ({len(files)} images)",
         duration_sec=0, total_frames=len(files), fps=0,
+        processing=False,
     )
 
     version = db.get_current_version()
@@ -596,7 +596,7 @@ def create_version(req: VersionRequest):
 @app.get("/api/videos/{video_id}/download")
 def download_video_zip(video_id: str):
     """Download all keyframe images of a single video as a ZIP."""
-    v = db.get_video_by_id(video_id)
+    v = db.get_video(video_id)
     if not v:
         raise HTTPException(404, "Video not found")
     images = db.get_images_for_video(video_id)
