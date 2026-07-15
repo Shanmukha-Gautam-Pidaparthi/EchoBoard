@@ -77,7 +77,7 @@ def _next_echd_id():
         )
         return f"ECHD{result['seq']:06d}"
 
-def insert_video(filename, duration_sec, total_frames, fps, processing=True):
+def insert_video(filename, duration_sec, total_frames, fps, processing=False):
     db = get_db()
     result = db.videos.insert_one({
         "filename": filename,
@@ -132,10 +132,17 @@ def get_videos(limit=50):
         })
     return res
 
-def delete_video_cascading(video_id):
+# Alias for backward compatibility with api.py
+get_video_by_id = get_video
+
+def delete_video(video_id):
+    """Delete a video and all its associated dataset images."""
     db = get_db()
     db.dataset_images.delete_many({"video_id": video_id})
     db.videos.delete_one({"_id": ObjectId(video_id)})
+
+# Alias
+delete_video_cascading = delete_video
 
 def insert_dataset_image(
     sequence_id: str,
@@ -215,9 +222,8 @@ def get_dataset_images(
         })
     return results
 
-def get_dataset_image_by_id(image_id):
-    db = get_db()
-    r = db.dataset_images.find_one({"image_id": image_id})
+def _format_dataset_image(r):
+    """Helper to convert a MongoDB document to a dict."""
     if not r:
         return None
     return {
@@ -238,6 +244,21 @@ def get_dataset_image_by_id(image_id):
         "video_id": r["video_id"],
         "change_score": r.get("change_score", 0.0),
     }
+
+def get_dataset_image_by_id(image_id):
+    """Find a dataset image by its ECHD image_id (e.g. ECHD000001)."""
+    db = get_db()
+    r = db.dataset_images.find_one({"image_id": image_id})
+    return _format_dataset_image(r)
+
+def get_dataset_image_by_internal_id(internal_id):
+    """Find a dataset image by its MongoDB _id (used for image serving)."""
+    db = get_db()
+    try:
+        r = db.dataset_images.find_one({"_id": ObjectId(internal_id)})
+    except Exception:
+        return None
+    return _format_dataset_image(r)
 
 def update_annotation_status(image_id, status):
     db = get_db()
