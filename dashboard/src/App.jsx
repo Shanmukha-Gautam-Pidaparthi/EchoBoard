@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { api } from "./api";
 import StatsBar from "./components/StatsBar";
 import UploadPanel from "./components/UploadPanel";
@@ -8,31 +8,8 @@ import DatasetExplorer from "./components/DatasetExplorer";
 const TABS = ["Folder Upload", "Dataset Library", "Dataset Explorer"];
 
 export default function App() {
-  const [tab, setTab] = useState("Dataset Library");
+  const [tab, setTab] = useState("Folder Upload");
   const [refreshKey, setRefreshKey] = useState(0);
-  const [processingVideos, setProcessingVideos] = useState([]);
-
-  // Periodically check if any videos are still processing
-  useEffect(() => {
-    function checkProcessing() {
-      api.getVideos().then(vs => {
-        const active = vs.filter(v => v.processing);
-        setProcessingVideos(active);
-      }).catch(() => {});
-    }
-    checkProcessing();
-    const interval = setInterval(checkProcessing, 4000);
-    return () => clearInterval(interval);
-  }, [refreshKey]);
-
-  async function handleStop(id) {
-    try {
-      await api.stopVideo(id);
-      setRefreshKey(k => k + 1);
-    } catch (err) {
-      console.error(err);
-    }
-  }
 
   function onUploadDone() {
     setRefreshKey(k => k + 1);
@@ -52,13 +29,7 @@ export default function App() {
       <main style={styles.main}>
         <StatsBar key={refreshKey} />
 
-        {/* Processing Banners */}
-        {processingVideos.map(v => (
-          <div key={v.id} style={styles.banner}>
-            <span>⏳ Processing in background: <strong>{v.filename}</strong></span>
-            <button onClick={() => handleStop(v.id)} style={styles.stopBtn}>Stop Processing</button>
-          </div>
-        ))}
+
 
         {/* Tab Navigation */}
         <div style={styles.tabs}>

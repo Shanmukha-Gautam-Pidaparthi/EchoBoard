@@ -1,11 +1,17 @@
+"""
+database.py
+EchoBoard Dataset — MongoDB Atlas Database Layer
+
+Stores image metadata in MongoDB Atlas using the ECHD schema.
+No SQLite fallback. If MongoDB is unreachable, the app will raise an error.
+"""
+
 import os
 import certifi
-import uuid
 from datetime import datetime
 import threading
 from pymongo import MongoClient, ASCENDING, DESCENDING
 from bson import ObjectId
-
 from dotenv import load_dotenv
 
 # Load environment variables from .env
@@ -20,7 +26,10 @@ DB_NAME = os.getenv("DATABASE_NAME", "EchoBoardDB")
 _client = None
 _id_lock = threading.Lock()
 
-def _create_mongo_client(timeout_ms=10000):
+
+def _create_mongo_client(timeout_ms=15000):
+    """Try multiple TLS configurations to connect to MongoDB Atlas."""
+    # Attempt 1: Standard TLS with system CA bundle
     try:
         client = MongoClient(
             MONGO_URI,
@@ -29,10 +38,12 @@ def _create_mongo_client(timeout_ms=10000):
             connectTimeoutMS=timeout_ms,
             socketTimeoutMS=30000,
         )
-        client.admin.command('ping')
+        client.admin.command("ping")
         return client
     except Exception:
         pass
+
+    # Attempt 2: TLS with relaxed certificate validation (for restrictive networks)
     client = MongoClient(
         MONGO_URI,
         tls=True,
@@ -41,8 +52,9 @@ def _create_mongo_client(timeout_ms=10000):
         connectTimeoutMS=timeout_ms,
         socketTimeoutMS=30000,
     )
-    client.admin.command('ping')
+    client.admin.command("ping")
     return client
+
 
 def get_db():
     global _client
@@ -52,261 +64,210 @@ def get_db():
         _client = _create_mongo_client()
     return _client[DB_NAME]
 
+
 def init_db():
+    """Initialize MongoDB collections and indexes.
+    If MongoDB is unreachable at startup, print a warning but don't crash.
+    The connection will be retried when get_db() is called during upload.
+    """
     if not MONGO_URI:
         raise Exception("MONGODB_URI is not set.")
-    db = get_db()
-    db.dataset_images.create_index([("image_id", ASCENDING)], unique=True)
-    db.dataset_images.create_index([("sequence_id", ASCENDING)])
-    db.dataset_images.create_index([("subject", ASCENDING)])
-    db.dataset_images.create_index([("annotation_status", ASCENDING)])
-    db.dataset_images.create_index([("dataset_version", ASCENDING)])
-    db.dataset_images.create_index([("writer_id", ASCENDING)])
-    db.videos.create_index([("uploaded_at", DESCENDING)])
-    if db.counters.find_one({"_id": "echd_image_id"}) is None:
-        db.counters.insert_one({"_id": "echd_image_id", "seq": 0})
-    print(f"  Database: MongoDB Atlas — '{DB_NAME}'")
+    try:
+        db = get_db()
+        db.dataset_images.create_index([("image_id", ASCENDING)], unique=True)
+        db.dataset_images.create_index([("created_at", DESCENDING)])
+        if db.counters.find_one({"_id": "image_counter"}) is None:
+            db.counters.insert_one({"_id": "image_counter", "seq": 0})
+        if db.counters.find_one({"_id": "annotation_counter"}) is None:
+            db.counters.insert_one({"_id": "annotation_counter", "seq": 0})
+        print(f"  Database: MongoDB Atlas — '{DB_NAME}' ✓ Connected")
+    except Exception as e:
+        # Reset client so get_db() will retry on next call
+        global _client
+        _client = None
+        print(f"  Database: MongoDB Atlas — DEFERRED (will retry on upload)")
+        print(f"  Reason: {str(e)[:100]}")
+        print(f"  Tip: Switch to mobile hotspot if on a restrictive network.")
 
-def _next_echd_id():
+
+
+# ---------------------------------------------------------------------------
+# Sequential ID Generators
+# ---------------------------------------------------------------------------
+def _next_image_id():
     with _id_lock:
         db = get_db()
         result = db.counters.find_one_and_update(
-            {"_id": "echd_image_id"},
+            {"_id": "image_counter"},
             {"$inc": {"seq": 1}},
             return_document=True,
         )
-        return f"ECHD{result['seq']:06d}"
+        return f"IMG{result['seq']:04d}"
 
-def insert_video(filename, duration_sec, total_frames, fps, processing=False):
-    db = get_db()
-    result = db.videos.insert_one({
-        "filename": filename,
-        "uploaded_at": datetime.utcnow().isoformat(),
-        "duration_sec": duration_sec,
-        "total_frames": total_frames,
-        "fps": fps,
-        "processing": processing,
-    })
-    return str(result.inserted_id)
 
-def update_video(video_id, duration_sec, total_frames, fps, processing=False):
-    db = get_db()
-    db.videos.update_one(
-        {"_id": ObjectId(video_id)},
-        {"$set": {
-            "duration_sec": duration_sec,
-            "total_frames": total_frames,
-            "fps": fps,
-            "processing": processing
-        }}
-    )
+def _next_annotation_id():
+    with _id_lock:
+        db = get_db()
+        result = db.counters.find_one_and_update(
+            {"_id": "annotation_counter"},
+            {"$inc": {"seq": 1}},
+            upsert=True,
+            return_document=True,
+        )
+        return f"ANN{result['seq']:04d}"
 
-def get_video(video_id):
-    db = get_db()
-    v = db.videos.find_one({"_id": ObjectId(video_id)})
-    if not v:
-        return None
-    return {
-        "id": str(v["_id"]),
-        "filename": v["filename"],
-        "uploaded_at": v["uploaded_at"],
-        "duration_sec": v["duration_sec"],
-        "total_frames": v["total_frames"],
-        "fps": v["fps"],
-        "processing": v.get("processing", False),
-    }
 
-def get_videos(limit=50):
-    db = get_db()
-    rows = db.videos.find().sort("uploaded_at", DESCENDING).limit(limit)
-    res = []
-    for v in rows:
-        res.append({
-            "id": str(v["_id"]),
-            "filename": v["filename"],
-            "uploaded_at": v["uploaded_at"],
-            "duration_sec": v["duration_sec"],
-            "total_frames": v["total_frames"],
-            "fps": v["fps"],
-            "processing": v.get("processing", False),
-        })
-    return res
-
-# Alias for backward compatibility with api.py
-get_video_by_id = get_video
-
-def delete_video(video_id):
-    """Delete a video and all its associated dataset images."""
-    db = get_db()
-    db.dataset_images.delete_many({"video_id": video_id})
-    db.videos.delete_one({"_id": ObjectId(video_id)})
-
-# Alias
-delete_video_cascading = delete_video
-
+# ---------------------------------------------------------------------------
+# Core CRUD — Dataset Images (new ECHD schema)
+# ---------------------------------------------------------------------------
 def insert_dataset_image(
-    sequence_id: str,
-    subject: str,
-    board_type: str,
-    writer_id: str,
-    frame_index: int,
-    timestamp_ms: int,
+    image_name: str,
     image_path: str,
-    dataset_version: str = "ECHD_v1",
-    uploaded_by: str = "system",
-    video_id: str = None,
-    change_score: float = 0.0,
+    width: int,
+    height: int,
+    format_type: str,
+    size_kb: int,
+    annotation_text: str = "",
+    annotation_class: str = "Text",
 ):
-    image_id = _next_echd_id()
-    now = datetime.utcnow().isoformat()
+    """Insert one image record using the ECHD schema."""
+    image_id = _next_image_id()
+    now = datetime.utcnow().isoformat() + "Z"
+
+    # Build annotations array
+    annotations = []
+    if annotation_text.strip():
+        ann_id = _next_annotation_id()
+        annotations.append({
+            "annotation_id": ann_id,
+            "class": annotation_class,
+            "bbox": [],
+            "text": annotation_text,
+            "latex": "",
+            "confidence": 0.0,
+        })
+
     doc = {
         "image_id": image_id,
-        "sequence_id": sequence_id,
-        "subject": subject,
-        "board_type": board_type,
-        "writer_id": writer_id,
-        "frame_index": frame_index,
-        "timestamp_ms": timestamp_ms,
+        "image_name": image_name,
         "image_path": image_path,
-        "annotation_status": "Pending",
-        "dataset_version": dataset_version,
+        "image_metadata": {
+            "width": width,
+            "height": height,
+            "format": format_type,
+            "size_kb": size_kb,
+        },
+        "annotations": annotations,
+        "quality_metadata": {
+            "blur_score": 0.0,
+            "lighting_score": 0,
+            "duplicate": False,
+            "occluded": False,
+            "selected": True,
+        },
+        "processing_status": {
+            "ocr_completed": False,
+            "annotation_completed": bool(annotation_text.strip()),
+            "reviewed": False,
+        },
         "created_at": now,
-        "uploaded_by": uploaded_by,
-        "upload_time": now,
-        "video_id": video_id or "",
-        "change_score": change_score,
+        "updated_at": now,
     }
     db = get_db()
     result = db.dataset_images.insert_one(doc)
-    doc["id"] = str(result.inserted_id)
+    doc["_id"] = str(result.inserted_id)
     return doc
 
-def get_dataset_images(
-    subject=None,
-    sequence_id=None,
-    writer_id=None,
-    annotation_status=None,
-    dataset_version=None,
-    video_id=None,
-    limit=200,
-):
+
+def get_dataset_images(limit=500, **kwargs):
+    """Return all dataset images, newest first."""
     db = get_db()
     query = {}
-    if subject: query["subject"] = subject
-    if sequence_id: query["sequence_id"] = sequence_id
-    if writer_id: query["writer_id"] = writer_id
-    if annotation_status: query["annotation_status"] = annotation_status
-    if dataset_version: query["dataset_version"] = dataset_version
-    if video_id: query["video_id"] = video_id
-
-    rows = db.dataset_images.find(query).sort("created_at", ASCENDING).limit(limit)
+    rows = db.dataset_images.find(query).sort("created_at", DESCENDING).limit(limit)
     results = []
     for r in rows:
-        results.append({
-            "id": str(r["_id"]),
-            "image_id": r["image_id"],
-            "sequence_id": r["sequence_id"],
-            "subject": r["subject"],
-            "board_type": r["board_type"],
-            "writer_id": r["writer_id"],
-            "frame_index": r["frame_index"],
-            "timestamp_ms": r["timestamp_ms"],
-            "image_path": r["image_path"],
-            "annotation_status": r["annotation_status"],
-            "dataset_version": r["dataset_version"],
-            "created_at": r["created_at"],
-            "uploaded_by": r["uploaded_by"],
-            "upload_time": r["upload_time"],
-            "video_id": r["video_id"],
-            "change_score": r.get("change_score", 0.0),
-        })
+        r["_id"] = str(r["_id"])
+        results.append(r)
     return results
 
-def _format_dataset_image(r):
-    """Helper to convert a MongoDB document to a dict."""
-    if not r:
-        return None
-    return {
-        "id": str(r["_id"]),
-        "image_id": r["image_id"],
-        "sequence_id": r["sequence_id"],
-        "subject": r["subject"],
-        "board_type": r["board_type"],
-        "writer_id": r["writer_id"],
-        "frame_index": r["frame_index"],
-        "timestamp_ms": r["timestamp_ms"],
-        "image_path": r["image_path"],
-        "annotation_status": r["annotation_status"],
-        "dataset_version": r["dataset_version"],
-        "created_at": r["created_at"],
-        "uploaded_by": r["uploaded_by"],
-        "upload_time": r["upload_time"],
-        "video_id": r["video_id"],
-        "change_score": r.get("change_score", 0.0),
-    }
 
 def get_dataset_image_by_id(image_id):
-    """Find a dataset image by its ECHD image_id (e.g. ECHD000001)."""
+    """Look up by ECHD image_id (e.g. IMG0001)."""
     db = get_db()
     r = db.dataset_images.find_one({"image_id": image_id})
-    return _format_dataset_image(r)
+    if r:
+        r["_id"] = str(r["_id"])
+    return r
+
 
 def get_dataset_image_by_internal_id(internal_id):
-    """Find a dataset image by its MongoDB _id (used for image serving)."""
-    db = get_db()
+    """Look up by MongoDB ObjectId string."""
     try:
+        db = get_db()
         r = db.dataset_images.find_one({"_id": ObjectId(internal_id)})
+        if r:
+            r["_id"] = str(r["_id"])
+        return r
     except Exception:
         return None
-    return _format_dataset_image(r)
 
-def update_annotation_status(image_id, status):
-    db = get_db()
-    db.dataset_images.update_one(
-        {"image_id": image_id},
-        {"$set": {"annotation_status": status}}
-    )
 
 def delete_dataset_image(image_id):
     db = get_db()
     db.dataset_images.delete_one({"image_id": image_id})
 
+
+# ---------------------------------------------------------------------------
+# Stats
+# ---------------------------------------------------------------------------
+def get_stats():
+    db = get_db()
+    total = db.dataset_images.count_documents({})
+    annotated = db.dataset_images.count_documents({"processing_status.annotation_completed": True})
+    return {
+        "total_images": total,
+        "annotated_images": annotated,
+        "pending_images": total - annotated,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Stub functions for legacy API endpoints (keeps api.py from crashing)
+# ---------------------------------------------------------------------------
+def get_videos(limit=50):
+    return []
+
+def get_video(video_id):
+    return None
+
+def insert_video(filename="", duration_sec=0, total_frames=0, fps=0, processing=True):
+    return "stub_video_id"
+
+def update_video(video_id="", duration_sec=0, total_frames=0, fps=0, processing=False):
+    pass
+
 def get_images_for_video(video_id):
-    return get_dataset_images(video_id=video_id, limit=10000)
+    return []
+
+def delete_video(video_id):
+    pass
 
 def get_current_version():
     return "ECHD_v1"
 
 def get_all_versions():
-    # Placeholder for versions in MongoDB
-    return [{"version_id": "ECHD_v1", "description": "Initial Database Version"}]
+    return [{"version_id": "ECHD_v1", "description": "Initial version"}]
 
 def create_new_version(description=""):
-    # Return a dummy string for now
     return "ECHD_v2"
 
-def upgrade_dataset_version(old_version, new_version):
-    db = get_db()
-    db.dataset_images.update_many(
-        {"dataset_version": old_version},
-        {"$set": {"dataset_version": new_version}}
-    )
 
-def get_stats():
+# ---------------------------------------------------------------------------
+# Data Purge (admin utility)
+# ---------------------------------------------------------------------------
+def purge_all():
+    """Delete ALL data from ALL collections. Use with extreme caution."""
     db = get_db()
-    total_videos = db.videos.count_documents({})
-    total_images = db.dataset_images.count_documents({})
-    pending = db.dataset_images.count_documents({"annotation_status": "Pending"})
-    annotated = db.dataset_images.count_documents({"annotation_status": "Completed"})
-    subjects = db.dataset_images.distinct("subject")
-    writers = db.dataset_images.distinct("writer_id")
-    
-    return {
-        "total_videos": total_videos,
-        "total_images": total_images,
-        "pending_annotations": pending,
-        "completed_annotations": annotated,
-        "subjects": subjects,
-        "writers": writers,
-        "current_version": get_current_version(),
-    }
+    db.dataset_images.drop()
+    db.counters.drop()
+    print("  All MongoDB collections purged.")

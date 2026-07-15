@@ -321,49 +321,75 @@ async def upload_video(
 @app.post("/api/upload/images")
 async def upload_images(
     files: list[UploadFile] = File(...),
-    subject: str = Form("General"),
-    board_type: str = Form("Blackboard"),
-    writer_id: str = Form("unknown"),
-    sequence_id: str = Form(""),
+    folder_name: str = Form("uploads"),
+    annotations_json: str = Form("{}"),
 ):
-    """Upload multiple board images directly into the ECHD dataset."""
+    """
+    Upload a folder of images into the ECHD dataset.
+
+    - files: the image files from webkitdirectory
+    - folder_name: name for organizing in MinIO
+    - annotations_json: JSON string mapping filename -> {text, class}
+    """
+    import json
+    import cv2
+    import numpy as np
+
     if not files:
         raise HTTPException(400, "No files provided")
 
-    video_id = db.insert_video(
-        filename=f"Image Upload ({len(files)} images)",
-        duration_sec=0, total_frames=len(files), fps=0,
-        processing=False,
-    )
+    # Parse per-image annotations
+    try:
+        annotations_map = json.loads(annotations_json)
+    except json.JSONDecodeError:
+        annotations_map = {}
 
-    version = db.get_current_version()
-    safe_subject = "".join(c if c.isalnum() or c in " _-" else "_" for c in subject).strip().lower().replace(" ", "_")
-    if not sequence_id:
-        sequence_id = f"{safe_subject}_{video_id[:8]}"
+    safe_folder = "".join(
+        c if c.isalnum() or c in " _-" else "_" for c in folder_name
+    ).strip().lower().replace(" ", "_") or "uploads"
 
+    stored_count = 0
     for i, img in enumerate(files):
         image_bytes = await img.read()
-        ext = os.path.splitext(img.filename or ".jpg")[1] or ".jpg"
-        fname = f"frame{i + 1:04d}{ext}"
-        stored_path = storage.store_image(image_bytes, safe_subject, sequence_id, fname)
+        if not image_bytes:
+            continue
 
+        original_name = img.filename or f"image_{i+1}.jpg"
+        ext = os.path.splitext(original_name)[1] or ".jpg"
+        fname = f"frame_{i + 1:06d}{ext}"
+
+        # Extract image dimensions
+        size_kb = max(1, len(image_bytes) // 1024)
+        np_arr = np.frombuffer(image_bytes, np.uint8)
+        img_cv = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        width, height = 0, 0
+        if img_cv is not None:
+            height, width = img_cv.shape[:2]
+
+        # Store binary in MinIO
+        stored_path = storage.store_image(image_bytes, safe_folder, "frames", fname)
+
+        # Get annotation for this file (by original filename)
+        ann = annotations_map.get(original_name, {})
+        ann_text = ann.get("text", "")
+        ann_class = ann.get("class", "Text")
+
+        # Insert metadata into MongoDB
         db.insert_dataset_image(
-            sequence_id=sequence_id,
-            subject=subject,
-            board_type=board_type,
-            writer_id=writer_id,
-            frame_index=i + 1,
-            timestamp_ms=0,
+            image_name=fname,
             image_path=stored_path,
-            dataset_version=version,
-            uploaded_by=writer_id,
-            video_id=video_id,
+            width=width,
+            height=height,
+            format_type=ext.replace(".", ""),
+            size_kb=size_kb,
+            annotation_text=ann_text,
+            annotation_class=ann_class,
         )
+        stored_count += 1
 
     return {
-        "video_id": video_id,
-        "sequence_id": sequence_id,
-        "images_stored": len(files),
+        "folder_name": safe_folder,
+        "images_stored": stored_count,
     }
 
 
@@ -533,22 +559,11 @@ def stop_video_processing(video_id: str):
 # ---------------------------------------------------------------------------
 @app.get("/api/dataset/images")
 def list_dataset_images(
-    subject: str = Query(None),
-    sequence_id: str = Query(None),
-    writer_id: str = Query(None),
-    annotation_status: str = Query(None),
-    dataset_version: str = Query(None),
     limit: int = Query(200),
 ):
-    """List dataset images with optional filtering."""
-    return db.get_dataset_images(
-        subject=subject,
-        sequence_id=sequence_id,
-        writer_id=writer_id,
-        annotation_status=annotation_status,
-        dataset_version=dataset_version,
-        limit=limit,
-    )
+    """List dataset images."""
+    return db.get_dataset_images(limit=limit)
+
 
 
 @app.get("/api/dataset/images/{image_id}")
