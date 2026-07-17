@@ -39,11 +39,20 @@ def _get_minio_client():
     if _minio_client is None:
         try:
             from minio import Minio
+            import urllib3
+            
+            # Configure a fast connection timeout (2.0s) so if the server is offline or unreachable,
+            # it falls back to local filesystem storage immediately without hanging.
+            timeout = urllib3.Timeout(connect=2.0, read=30.0)
+            retries = urllib3.Retry(total=1, backoff_factor=0.1)
+            http_client = urllib3.PoolManager(timeout=timeout, retries=retries)
+            
             _minio_client = Minio(
                 MINIO_ENDPOINT,
                 access_key=MINIO_ACCESS_KEY,
                 secret_key=MINIO_SECRET_KEY,
                 secure=MINIO_SECURE,
+                http_client=http_client,
             )
         except ImportError:
             raise RuntimeError("minio package not installed. Run: pip install minio")
@@ -112,6 +121,7 @@ def get_image(object_path: str) -> bytes:
     """
     Retrieve an image by its object path.
     Returns the raw image bytes.
+    If the exact path doesn't exist, tries alternative extensions (.png, .jpg, .jpeg).
     """
     if USE_MINIO:
         try:
@@ -124,11 +134,21 @@ def get_image(object_path: str) -> bytes:
         except Exception as e:
             print(f"  MinIO read failed: {e}. Trying local storage.")
 
-    # Local filesystem fallback
+    # Local filesystem fallback — try exact path first, then alternative extensions
     local_path = os.path.join(LOCAL_DATASET_DIR, object_path.replace("/", os.sep))
     if os.path.exists(local_path):
         with open(local_path, "rb") as f:
             return f.read()
+
+    # Try alternative extensions (handles .jpeg vs .png mismatch)
+    base, ext = os.path.splitext(local_path)
+    for alt_ext in [".png", ".jpg", ".jpeg"]:
+        if alt_ext != ext:
+            alt_path = base + alt_ext
+            if os.path.exists(alt_path):
+                with open(alt_path, "rb") as f:
+                    return f.read()
+
     return b""
 
 
