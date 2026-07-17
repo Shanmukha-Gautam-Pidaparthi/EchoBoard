@@ -160,19 +160,24 @@ def get_keyframe_image(image_id: str):
     Serve an image by its internal DB id or ECHD image_id.
     Uses efficient MongoDB _id lookup — no full table scan.
     """
+    def _detect_media_type(path: str) -> str:
+        if path.lower().endswith(".png"):
+            return "image/png"
+        return "image/jpeg"
+
     # Try by internal MongoDB _id first (this is what the frontend sends)
     record = db.get_dataset_image_by_internal_id(image_id)
     if record:
         data = storage.get_image(record["image_path"])
         if data:
-            return Response(content=data, media_type="image/jpeg")
+            return Response(content=data, media_type=_detect_media_type(record["image_path"]))
 
-    # Try by ECHD image_id (e.g. ECHD000001)
+    # Try by ECHD image_id (e.g. IMG0001, ECHD000001)
     record = db.get_dataset_image_by_id(image_id)
     if record:
         data = storage.get_image(record["image_path"])
         if data:
-            return Response(content=data, media_type="image/jpeg")
+            return Response(content=data, media_type=_detect_media_type(record["image_path"]))
 
     raise HTTPException(404, "Image not found")
 
